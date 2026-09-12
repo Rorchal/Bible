@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# 向量库是可重建产物，不入库
+data/04_index/*
+!data/04_index/.gitkeep
+
+# 音频不入库（太大）
+*.mp3
+*.wav
+*.m4a
+*.mp4
