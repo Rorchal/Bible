@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from pipeline.common import REFINED_DIR, load_transcript, write_json
+from pipeline.outline import LINE
 from pipeline.hotwords import apply_hotwords, load_hotwords
 from pipeline.outline import OUTLINE_DIR, parse_outline, slice_text, validate
 
@@ -54,7 +55,7 @@ def to_markdown(outline, doc_id: str, source: Path, raw_len: int) -> str:
         f"# {outline.title}",
         "",
         f"- **来源**：`{source}`（{raw_len} 字）",
-        f"- **目录**：{len(outline.segments)} 段，切片共 {total} 字",
+        f"- **目录**：{len(outline.segments)} 段（按{outline.unit_name}定位），切片共 {total} 字",
         "",
         "---",
         "",
@@ -68,7 +69,7 @@ def to_markdown(outline, doc_id: str, source: Path, raw_len: int) -> str:
             section = s.section
             lines += [f"### {section}", ""]
         lines += [
-            f"**[{s.seg_no}]** `offset {s.start}–{s.end}`（{len(s.text)} 字）",
+            f"**[{s.seg_no}]** `{outline.unit_name} {s.start}–{s.end}`（{len(s.text)} 字）",
             "",
             f"> {s.summary}",
             "",
@@ -101,14 +102,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"找不到目录：{outline_path}", file=sys.stderr)
         return 1
 
-    transcript = load_transcript(args.source)
-    text = transcript.text
     outline = parse_outline(outline_path)
 
-    print(f"目录：{outline_path.name}  {len(outline.segments)} 段")
-    print(f"原文：{args.source.name}  {len(text)} 字")
+    if args.source.suffix.lower() in {".txt", ".md"}:
+        # offset 指向原始文件，不能用规范化过的文本，否则会整体错位
+        text = args.source.read_text(encoding="utf-8").lstrip("\ufeff")
+        transcript = None
+    else:
+        transcript = load_transcript(args.source)
+        text = transcript.text
 
-    issues = validate(outline, len(text))
+    line_count = len(text.rstrip("\n").split("\n"))
+    extent = line_count if outline.unit == LINE else len(text)
+
+    print(f"目录：{outline_path.name}  {len(outline.segments)} 段  单位：{outline.unit_name}")
+    print(f"原文：{args.source.name}  {len(text)} 字 / {line_count} 行")
+
+    issues = validate(outline, extent)
     errors = [i for i in issues if i.level == "错误"]
     for issue in issues:
         print(f"  [{issue.level}] {issue.message}")
@@ -138,6 +148,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     covered = sum(len(s.text) for s in outline.segments)
+    covered_units = (
+        sum(s.end - s.start + 1 for s in outline.segments)
+        if outline.unit == LINE
+        else covered
+    )
     write_json(
         REFINED_DIR / f"{doc_id}.json",
         {
@@ -161,7 +176,8 @@ def main(argv: list[str] | None = None) -> int:
                 "doc_id": doc_id,
                 "path": str(args.source),
                 "outline": str(outline_path),
-                "has_timestamps": transcript.has_timestamps,
+                "unit": outline.unit,
+                "has_timestamps": bool(transcript and transcript.has_timestamps),
                 "raw_chars": len(text),
                 "refined_chars": covered,
                 "retention": round(covered / max(len(text), 1), 3),
@@ -171,8 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print(
-        f"\n✓ {len(outline.segments)} 段，覆盖 {covered}/{len(text)} 字"
-        f"（{covered / max(len(text), 1):.1%}）"
+        f"\n✓ {len(outline.segments)} 段，覆盖 {covered_units}/{extent} {outline.unit_name}"
+        f"（{covered_units / max(extent, 1):.1%}），正文共 {covered} 字"
         f"\n  → data/02_refined/{doc_id}.md"
         f"\n  → data/02_refined/{doc_id}.json"
     )

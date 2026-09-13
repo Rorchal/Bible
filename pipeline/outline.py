@@ -21,6 +21,11 @@ _CHAPTER = re.compile(r"^##\s+(?!#)(.+?)\s*$", re.M)
 _SECTION = re.compile(r"^###\s+(.+?)\s*$", re.M)
 _ROW = re.compile(r"^\|\s*([0-9]+-[0-9]+)\s*\|(.*?)\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*$")
 _TOTAL = re.compile(r"总字符长度[：:]\s*(\d+)")
+_TOTAL_LINES = re.compile(r"总行数[：:]\s*(\d+)")
+_HEADER_LINE = re.compile(r"^\|.*开始行.*\|.*结束行.*\|\s*$", re.M)
+
+CHAR = "char"   # offset 是字符下标，闭区间
+LINE = "line"   # offset 是行号，1 起，闭区间
 
 
 @dataclass
@@ -44,6 +49,11 @@ class Outline:
     segments: list[Segment] = field(default_factory=list)
     declared_total: int | None = None
     source_name: str = ""
+    unit: str = CHAR
+
+    @property
+    def unit_name(self) -> str:
+        return "行" if self.unit == LINE else "字符"
 
 
 def _strip_offset_suffix(heading: str) -> str:
@@ -57,7 +67,9 @@ def parse_outline(path: Path) -> Outline:
     title_match = re.search(r"^#\s+(.+?)\s*$", raw, re.M)
     title = title_match.group(1).strip() if title_match else path.stem
 
-    total_match = _TOTAL.search(raw)
+    unit = LINE if _HEADER_LINE.search(raw) else CHAR
+
+    total_match = (_TOTAL_LINES if unit == LINE else _TOTAL).search(raw)
     declared_total = int(total_match.group(1)) if total_match else None
 
     name_match = re.search(r"文档名称[：:]\s*(\S+)", raw)
@@ -90,7 +102,7 @@ def parse_outline(path: Path) -> Outline:
                 )
             )
 
-    return Outline(title, segments, declared_total, source_name)
+    return Outline(title, segments, declared_total, source_name, unit)
 
 
 @dataclass
@@ -111,8 +123,11 @@ def validate(outline: Outline, text_length: int | None = None) -> list[Issue]:
         if s.end < s.start:
             issues.append(Issue("错误", f"{s.seg_no} 终点 {s.end} 小于起点 {s.start}"))
 
-    if segs[0].start != 0:
-        issues.append(Issue("警告", f"首段起点是 {segs[0].start}，不是 0"))
+    first = 1 if outline.unit == LINE else 0
+    if segs[0].start != first:
+        issues.append(
+            Issue("警告", f"首段起点是 {segs[0].start}，不是 {first}")
+        )
 
     for prev, cur in zip(segs, segs[1:]):
         gap = cur.start - prev.end
@@ -126,25 +141,37 @@ def validate(outline: Outline, text_length: int | None = None) -> list[Issue]:
                 Issue("错误", f"{prev.seg_no} 与 {cur.seg_no} 重叠 {1 - gap} 个字符")
             )
 
+    unit = outline.unit_name
     covered = segs[-1].end - segs[0].start + 1
     if outline.declared_total is not None and covered != outline.declared_total:
         issues.append(
-            Issue("警告", f"按闭区间覆盖 {covered} 字，元信息声明 {outline.declared_total} 字，"
+            Issue("警告", f"按闭区间覆盖 {covered} {unit}，元信息声明 "
+                          f"{outline.declared_total} {unit}，"
                           f"差 {covered - outline.declared_total}")
         )
 
-    if text_length is not None and segs[-1].end >= text_length:
-        issues.append(
-            Issue("警告", f"末段终点 {segs[-1].end} 超出原文长度 {text_length}"
-                          f"（最大下标 {text_length - 1}），末段将被截到原文结尾")
-        )
+    if text_length is not None:
+        last = text_length if outline.unit == LINE else text_length - 1
+        if segs[-1].end > last:
+            issues.append(
+                Issue("警告", f"末段终点 {segs[-1].end} 超出原文（共 {text_length} "
+                              f"{unit}，最大 {last}），末段将被截到结尾")
+            )
 
     return issues
 
 
 def slice_text(outline: Outline, text: str) -> None:
     """按 offset 把原文切进每个 Segment。闭区间，越界自动截断。"""
+    if outline.unit == LINE:
+        lines = text.rstrip("\n").split("\n")
+        for s in outline.segments:
+            a = max(1, min(s.start, len(lines)))      # 行号 1 起
+            b = max(a, min(s.end, len(lines)))
+            s.text = "\n".join(lines[a - 1 : b])
+        return
+
     for s in outline.segments:
-        start = max(0, min(s.start, len(text)))
-        end = max(start, min(s.end + 1, len(text)))  # 闭区间 → 切片要 +1
-        s.text = text[start:end]
+        a = max(0, min(s.start, len(text)))
+        b = max(a, min(s.end + 1, len(text)))          # 闭区间 → 切片要 +1
+        s.text = text[a:b]
