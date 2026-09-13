@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import anthropic
@@ -26,6 +27,7 @@ from pipeline.common import (
     with_time_markers,
     write_json,
 )
+from pipeline.hotwords import Entry, apply_hotwords, glossary_for_prompt, load_hotwords
 from pipeline.prompts import (
     OVERVIEW_SCHEMA,
     OVERVIEW_SYSTEM,
@@ -84,9 +86,17 @@ def _call(
 
 
 def refine_transcript(
-    client: anthropic.Anthropic, transcript: Transcript, effort: str
+    client: anthropic.Anthropic,
+    transcript: Transcript,
+    effort: str,
+    hotwords: list[Entry],
 ) -> dict:
     source = with_time_markers(transcript)
+
+    # 送模型之前先把已知错字改掉，模型读到的就是通顺文本
+    source, pre_hits = apply_hotwords(source, hotwords)
+    glossary = glossary_for_prompt(hotwords)
+
     windows = window_text(source, WINDOW_CHARS, WINDOW_OVERLAP)
 
     if len(windows) == 1:
@@ -94,7 +104,9 @@ def refine_transcript(
         result = _call(
             client,
             system=REFINE_SYSTEM,
-            user=build_refine_user_prompt(windows[0], transcript.doc_id),
+            user=build_refine_user_prompt(
+                windows[0], transcript.doc_id, glossary=glossary
+            ),
             schema=REFINE_SCHEMA,
             effort=effort,
         )
@@ -109,7 +121,7 @@ def refine_transcript(
                 client,
                 system=REFINE_SYSTEM,
                 user=build_refine_user_prompt(
-                    window, transcript.doc_id, i, len(windows)
+                    window, transcript.doc_id, i, len(windows), glossary
                 ),
                 schema=SEGMENTS_ONLY_SCHEMA,
                 effort=effort,
@@ -129,8 +141,16 @@ def refine_transcript(
         )
         result = {**overview, "segments": segments}
 
+    post_hits: Counter[str] = Counter()
     for i, segment in enumerate(result["segments"]):
         segment["segment_id"] = f"{transcript.doc_id}::{i:02d}"
+        # 模型偶尔会把正确词又写回错的，输出后再兜一遍
+        for field in ("heading", "summary", "text"):
+            segment[field], hits = apply_hotwords(segment[field], hotwords)
+            post_hits += hits
+    for field in ("title", "theme"):
+        result[field], hits = apply_hotwords(result[field], hotwords)
+        post_hits += hits
 
     refined_chars = sum(len(s["text"]) for s in result["segments"])
     result["source"] = {
@@ -140,6 +160,10 @@ def refine_transcript(
         "raw_chars": transcript.char_count,
         "refined_chars": refined_chars,
         "retention": round(refined_chars / max(transcript.char_count, 1), 3),
+    }
+    result["hotword_hits"] = {
+        "pre": dict(pre_hits),   # 原文里改掉的
+        "post": dict(post_hits),  # 模型输出里又兜回来的
     }
     return result
 
@@ -192,6 +216,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    try:
+        hotwords = load_hotwords()
+    except ValueError as exc:
+        print(f"热词表有问题：{exc}", file=sys.stderr)
+        return 1
+    if hotwords:
+        print(f"热词表：{len(hotwords)} 条 —— {'、'.join(c for c, _ in hotwords)}")
+
     transcripts = iter_transcripts()
     if args.only:
         transcripts = [t for t in transcripts if args.only in t.doc_id]
@@ -212,8 +244,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         for t in pending:
             stamps = "有时间轴" if t.has_timestamps else "无时间轴"
-            batches = len(window_text(with_time_markers(t), WINDOW_CHARS))
-            print(f"  {t.doc_id}  {t.char_count} 字  {stamps}  分 {batches} 批")
+            marked = with_time_markers(t)
+            _, hits = apply_hotwords(marked, hotwords)
+            batches = len(window_text(marked, WINDOW_CHARS))
+            line = f"  {t.doc_id}  {t.char_count} 字  {stamps}  分 {batches} 批"
+            if hits:
+                line += "  热词命中：" + "、".join(
+                    f"{w}×{n}" for w, n in hits.most_common()
+                )
+            print(line)
         print(f"\n共 {len(pending)} 个文件待处理。去掉 --dry-run 开始。")
         return 0
 
@@ -227,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     for t in pending:
         print(f"\n[{t.doc_id}]")
         try:
-            result = refine_transcript(client, t, args.effort)
+            result = refine_transcript(client, t, args.effort, hotwords)
         except anthropic.RateLimitError as exc:
             print(f"    限流：{exc}", file=sys.stderr)
             failures += 1
@@ -255,6 +294,16 @@ def main(argv: list[str] | None = None) -> int:
             f"    ✓ {len(result['segments'])} 段，"
             f"保留率 {src['retention']:.0%} → data/02_refined/{t.doc_id}.md"
         )
+        hw = result["hotword_hits"]
+        if hw["pre"] or hw["post"]:
+            parts = [f"{w}×{n}" for w, n in sorted(hw["pre"].items())]
+            note = "    热词修正：" + "、".join(parts) if parts else "    热词修正："
+            if hw["post"]:
+                note += "（模型输出里又兜回 " + "、".join(
+                    f"{w}×{n}" for w, n in sorted(hw["post"].items())
+                ) + "）"
+            print(note)
+
         if src["retention"] < 0.7:
             print(
                 "    ⚠ 保留率偏低，可能被摘要了。打开 .md 核对一下，"

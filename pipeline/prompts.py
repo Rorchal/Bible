@@ -129,7 +129,11 @@ OVERVIEW_SCHEMA = {
 
 
 def build_refine_user_prompt(
-    text: str, doc_id: str, window_index: int = 0, window_total: int = 1
+    text: str,
+    doc_id: str,
+    window_index: int = 0,
+    window_total: int = 1,
+    glossary: str = "",
 ) -> str:
     header = f"讲道文件名：{doc_id}"
     if window_total > 1:
@@ -138,4 +142,5 @@ def build_refine_user_prompt(
             f"（长文分批处理）。只整理下面给你的这一批内容，"
             f"不要补写前后文，也不要因为它在中间就省略开头或结尾。"
         )
+    header += glossary
     return f"{header}\n\n以下是需要整理的转录原文：\n\n<转录原文>\n{text}\n</转录原文>"
