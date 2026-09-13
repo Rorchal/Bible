@@ -222,7 +222,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"热词表有问题：{exc}", file=sys.stderr)
         return 1
     if hotwords:
-        print(f"热词表：{len(hotwords)} 条 —— {'、'.join(c for c, _ in hotwords)}")
+        print(
+            f"热词表：{len(hotwords)} 条 —— "
+            f"{'、'.join(e.correct for e in hotwords)}"
+        )
 
     transcripts = iter_transcripts()
     if args.only:
