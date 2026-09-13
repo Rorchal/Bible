@@ -27,7 +27,14 @@ from pipeline.common import (
     with_time_markers,
     write_json,
 )
-from pipeline.hotwords import Entry, apply_hotwords, glossary_for_prompt, load_hotwords
+from pipeline.hotwords import (
+    JUDGE,
+    REPLACE,
+    Entry,
+    apply_hotwords,
+    glossary_for_prompt,
+    load_hotwords,
+)
 from pipeline.prompts import (
     OVERVIEW_SCHEMA,
     OVERVIEW_SYSTEM,
@@ -222,10 +229,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"热词表有问题：{exc}", file=sys.stderr)
         return 1
     if hotwords:
-        print(
-            f"热词表：{len(hotwords)} 条 —— "
-            f"{'、'.join(e.correct for e in hotwords)}"
-        )
+        fixed = [e.correct for e in hotwords if e.mode == REPLACE]
+        judged = [e.correct for e in hotwords if e.mode == JUDGE]
+        print(f"热词表：{len(hotwords)} 条")
+        if fixed:
+            print(f"  确定性替换：{'、'.join(dict.fromkeys(fixed))}")
+        if judged:
+            print(f"  交给模型判断：{'、'.join(dict.fromkeys(judged))}")
 
     transcripts = iter_transcripts()
     if args.only:
