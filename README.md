@@ -41,6 +41,13 @@ pip install -r requirements.txt
 export ANTHROPIC_API_KEY=sk-ant-...     # 或者跑 `ant auth login`
 ```
 
+在自己的服务器上部署，可以直接用 [`scripts/bootstrap.sh`](scripts/bootstrap.sh)，
+它会 clone 仓库、建虚拟环境、装依赖：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Rorchal/Bible/claude/bible-audio-rag-system-44nysl/scripts/bootstrap.sh | bash
+```
+
 ## 第二步：提炼
 
 **1. 把转录文本放进 `data/01_raw/`**，一段录音一个文件。
